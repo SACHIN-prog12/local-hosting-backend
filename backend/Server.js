@@ -9,12 +9,33 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
-app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? process.env.FRONTEND_URL
-    : ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5000']
-}));
 app.use(express.json());
+
+// CORS Configuration
+app.use(cors({
+  origin: (origin, callback) => {
+    const allowedOrigins = process.env.NODE_ENV === 'production'
+      ? [
+          process.env.FRONTEND_URL,
+          'file://',
+          'http://localhost:3000',
+          'http://127.0.0.1:3000',
+          `http://localhost:${PORT}`
+        ]
+      : [
+          'http://localhost:3000',
+          'http://127.0.0.1:3000',
+          `http://localhost:${PORT}`
+        ];
+
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`Not allowed by CORS: ${origin}`));
+    }
+  },
+  credentials: true
+}));
 
 // MongoDB Connection
 const connectDB = async () => {
@@ -29,7 +50,7 @@ const connectDB = async () => {
 
 connectDB();
 
-// Member Schema
+// UPDATED Member Schema
 const memberSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -76,99 +97,149 @@ const memberSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
-  lastExpiryReminderSentAt: {
+  // NEW FIELDS FOR IMPROVED LOGIC
+  actualExpiryDate: {
+    type: Date // The actual membership expiry date
+  },
+  unpaidSince: {
+    type: Date // When the status was changed to unpaid
+  },
+  smsReminderCount: {
+    type: Number,
+    default: 0
+  },
+  lastSmsReminderSentAt: {
     type: Date
   },
-  lastUnpaidReminderSentAt: {
+  autoUnpaidTriggered: {
+    type: Boolean,
+    default: false
+  },
+  // NEW: Track overdue status
+  overdueStatus: {
+    type: String,
+    enum: ['current', 'overdue'],
+    default: 'current'
+  },
+  overdueSince: {
     type: Date
   }
 }, {
   timestamps: true
 });
 
-// FIXED: Improved calculateNextPaymentDue method
-memberSchema.methods.calculateNextPaymentDue = function() {
-  let baseDate;
-  
-  // Determine the base date for calculation
-  if (this.feeStatus === 'paid' && this.lastPaymentDate) {
-    // For paid members, use the last payment date
-    baseDate = new Date(this.lastPaymentDate);
-  } else if (this.nextPaymentDue && this.feeStatus === 'unpaid') {
-    // For unpaid members, keep the existing due date (don't recalculate)
-    return new Date(this.nextPaymentDue);
-  } else {
-    // For new members or when no payment history exists, use admission date
-    baseDate = new Date(this.admissionDate);
-  }
-  
-  console.log(`[${this.name}] Base date for calculation:`, baseDate);
-  console.log(`[${this.name}] Fee status:`, this.feeStatus);
-  console.log(`[${this.name}] Membership type:`, this.membershipType);
-  
-  // Create next due date based on membership type
+// UPDATED: Calculate next payment and expiry dates
+memberSchema.methods.calculatePaymentDates = function(fromDate = null) {
+  const baseDate = fromDate || new Date();
   const nextDue = new Date(baseDate);
+  const actualExpiry = new Date(baseDate);
   
   switch (this.membershipType) {
     case 'Monthly':
       nextDue.setMonth(nextDue.getMonth() + 1);
+      actualExpiry.setMonth(actualExpiry.getMonth() + 1);
       break;
     case 'Quarterly':
       nextDue.setMonth(nextDue.getMonth() + 3);
+      actualExpiry.setMonth(actualExpiry.getMonth() + 3);
       break;
     case 'Half-Yearly':
       nextDue.setMonth(nextDue.getMonth() + 6);
+      actualExpiry.setMonth(actualExpiry.getMonth() + 6);
       break;
     case 'Yearly':
       nextDue.setFullYear(nextDue.getFullYear() + 1);
+      actualExpiry.setFullYear(actualExpiry.getFullYear() + 1);
       break;
     default:
       throw new Error(`Unknown membership type: ${this.membershipType}`);
   }
   
-  console.log(`[${this.name}] Calculated next due date:`, nextDue);
-  return nextDue;
+  return {
+    nextPaymentDue: nextDue,
+    actualExpiryDate: actualExpiry
+  };
 };
 
-// FIXED: Pre-save middleware with better logic
+// NEW: Method to calculate overdue days
+memberSchema.methods.getOverdueDays = function() {
+  if (this.feeStatus === 'paid' || !this.actualExpiryDate) {
+    return 0;
+  }
+  
+  const today = new Date();
+  const expiryDate = new Date(this.actualExpiryDate);
+  
+  if (today > expiryDate) {
+    return Math.ceil((today - expiryDate) / (1000 * 60 * 60 * 24));
+  }
+  
+  return 0;
+};
+
+// UPDATED: Pre-save middleware with overdue logic
 memberSchema.pre('save', function(next) {
   try {
     const isNewMember = this.isNew;
     const isAdmissionDateChanged = this.isModified('admissionDate');
     const isMembershipTypeChanged = this.isModified('membershipType');
     const isFeeStatusChanged = this.isModified('feeStatus');
-    const isLastPaymentDateChanged = this.isModified('lastPaymentDate');
     
     console.log(`[${this.name}] Pre-save check:`, {
       isNewMember,
       isAdmissionDateChanged,
       isMembershipTypeChanged,
       isFeeStatusChanged,
-      isLastPaymentDateChanged
+      currentFeeStatus: this.feeStatus
     });
     
-    // Calculate next payment due for new members or when relevant fields change
-    if (isNewMember || isAdmissionDateChanged || isMembershipTypeChanged || 
-        (isFeeStatusChanged && this.feeStatus === 'paid') || isLastPaymentDateChanged) {
+    // For new members, calculate from admission date
+    if (isNewMember) {
+      const dates = this.calculatePaymentDates(this.admissionDate);
+      this.nextPaymentDue = dates.nextPaymentDue;
+      this.actualExpiryDate = dates.actualExpiryDate;
+      this.lastPaymentDate = this.admissionDate;
+      this.feeStatus = 'paid';
+      this.autoUnpaidTriggered = false;
+      this.smsReminderCount = 0;
+      this.overdueStatus = 'current';
+      this.overdueSince = null;
       
-      if (this.membershipType && this.admissionDate) {
-        this.nextPaymentDue = this.calculateNextPaymentDue();
-        
-        // For new members, determine initial fee status based on calculated due date
-        if (isNewMember) {
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
-          const dueDate = new Date(this.nextPaymentDue);
-          dueDate.setHours(0, 0, 0, 0);
-          
-          if (dueDate < today) {
-            this.feeStatus = 'unpaid';
-            console.log(`[${this.name}] Set as unpaid due to past due date`);
-          } else {
-            this.feeStatus = 'paid';
-            console.log(`[${this.name}] Set as paid - due date is in future`);
-          }
-        }
+      console.log(`[${this.name}] New member - Expiry: ${this.actualExpiryDate.toDateString()}, Next Due: ${this.nextPaymentDue.toDateString()}`);
+    }
+    
+    // When fee status changes to paid (manual payment)
+    if (isFeeStatusChanged && this.feeStatus === 'paid') {
+      const paymentDate = new Date();
+      const dates = this.calculatePaymentDates(paymentDate);
+      
+      this.lastPaymentDate = paymentDate;
+      this.nextPaymentDue = dates.nextPaymentDue;
+      this.actualExpiryDate = dates.actualExpiryDate;
+      this.unpaidSince = null;
+      this.autoUnpaidTriggered = false;
+      this.smsReminderCount = 0; // Reset SMS count for new period
+      this.lastSmsReminderSentAt = null;
+      this.overdueStatus = 'current';
+      this.overdueSince = null;
+      
+      console.log(`[${this.name}] Payment received - New expiry: ${this.actualExpiryDate.toDateString()}`);
+    }
+    
+    // When fee status changes to unpaid
+    if (isFeeStatusChanged && this.feeStatus === 'unpaid') {
+      if (!this.unpaidSince) {
+        this.unpaidSince = new Date();
+      }
+      // Note: overdueStatus will be updated by the cron job based on expiry date
+    }
+    
+    // Recalculate if admission date or membership type changes
+    if ((isAdmissionDateChanged || isMembershipTypeChanged) && !isNewMember) {
+      if (this.feeStatus === 'paid') {
+        const dates = this.calculatePaymentDates(this.lastPaymentDate || this.admissionDate);
+        this.nextPaymentDue = dates.nextPaymentDue;
+        this.actualExpiryDate = dates.actualExpiryDate;
       }
     }
     
@@ -188,7 +259,7 @@ const sendSMS = async (phoneNumber, message) => {
 
   if (!authKey || !senderId) {
     console.warn('⚠️ MSG91 API keys not configured. SMS will not be sent.');
-    return;
+    return false;
   }
 
   try {
@@ -207,151 +278,253 @@ const sendSMS = async (phoneNumber, message) => {
     });
 
     if (response.data.type === 'success') {
-      console.log(`✔️ SMS sent successfully to ${phoneNumber}: ${message}`);
+      console.log(`✔️ SMS sent successfully to ${phoneNumber}`);
+      return true;
     } else {
       console.error(`❌ Failed to send SMS to ${phoneNumber}:`, response.data);
+      return false;
     }
   } catch (error) {
     console.error(`❌ Error sending SMS to ${phoneNumber}:`, error.message);
+    return false;
   }
 };
 
-// FIXED: Improved expiry reminder function
-const scheduleExpiryReminders = async () => {
-  console.log('🔔 Running daily expiry reminder check...');
-  const today = new Date();
-  const twoDaysLater = new Date();
-  twoDaysLater.setDate(today.getDate() + 2);
+// NEW: Update overdue status for all members
 
-  // Set to start and end of day for accurate comparison
-  today.setHours(0, 0, 0, 0);
-  twoDaysLater.setHours(23, 59, 59, 999);
-
-  try {
-    const membersToRemind = await Member.find({
-      isActive: true,
-      feeStatus: 'paid',
-      nextPaymentDue: { $gte: today, $lte: twoDaysLater },
-      $or: [
-        { lastExpiryReminderSentAt: { $exists: false } },
-        { lastExpiryReminderSentAt: null },
-        { lastExpiryReminderSentAt: { $lt: today } }
-      ]
-    });
-
-    console.log(`Found ${membersToRemind.length} members to remind about expiry`);
-
-    for (const member of membersToRemind) {
-      const dueDate = new Date(member.nextPaymentDue);
-      const message = `Hi ${member.name}, your gym membership is due on ${dueDate.toDateString()}. Please pay to continue service.`;
-      await sendSMS(member.phone, message);
-      
-      // Update reminder timestamp
-      await Member.findByIdAndUpdate(member._id, { 
-        lastExpiryReminderSentAt: new Date() 
-      });
-      
-      console.log(`✔️ Sent expiry reminder to ${member.name}`);
-    }
-  } catch (error) {
-    console.error('❌ Error scheduling expiry reminders:', error);
-  }
-};
-
-// FIXED: Improved unpaid reminder function
-const scheduleUnpaidReminders = async () => {
-  console.log('💸 Running daily unpaid reminder check...');
-  const today = new Date();
-  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  
-  today.setHours(0, 0, 0, 0);
-
-  try {
-    const unpaidMembers = await Member.find({
-      isActive: true,
-      feeStatus: 'unpaid',
-      nextPaymentDue: { $lt: today }, // Actually overdue
-      $or: [
-        { lastUnpaidReminderSentAt: { $exists: false } },
-        { lastUnpaidReminderSentAt: null },
-        { lastUnpaidReminderSentAt: { $lt: twentyFourHoursAgo } }
-      ]
-    });
-
-    console.log(`Found ${unpaidMembers.length} unpaid members to remind`);
-
-    for (const member of unpaidMembers) {
-      const dueDate = new Date(member.nextPaymentDue);
-      const message = `Hi ${member.name}, your gym membership fee is overdue since ${dueDate.toDateString()}. Please make your payment as soon as possible.`;
-      await sendSMS(member.phone, message);
-      
-      // Update reminder timestamp
-      await Member.findByIdAndUpdate(member._id, { 
-        lastUnpaidReminderSentAt: new Date() 
-      });
-      
-      console.log(`✔️ Sent unpaid reminder to ${member.name}`);
-    }
-  } catch (error) {
-    console.error('❌ Error scheduling unpaid reminders:', error);
-  }
-};
-
-// FIXED: Improved overdue function with better logic
-const updateOverdueMembers = async () => {
-  console.log('🔄 Checking for overdue members...');
+    // CORRECTED: Update overdue status - starts day after expiry
+const updateOverdueStatus = async () => {
+  console.log('🔄 Updating overdue status...');
   
   try {
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    yesterday.setHours(23, 59, 59, 999);
 
-    // Find members whose payment is due before today but are still marked as paid
-    const overdueMembers = await Member.find({
-      nextPaymentDue: { $lt: today },
-      feeStatus: 'paid',
-      isActive: true
+    // Find unpaid members whose expiry was yesterday or earlier (overdue)
+    const newlyOverdueMembers = await Member.find({
+      isActive: true,
+      feeStatus: 'unpaid',
+      overdueStatus: 'current',
+      actualExpiryDate: { $lt: yesterday }
     });
 
-    console.log(`Found ${overdueMembers.length} members who are overdue`);
-
-    let updated = 0;
-    for (const member of overdueMembers) {
-      console.log(`Marking ${member.name} as unpaid - due date was ${member.nextPaymentDue.toDateString()}`);
-      
+    let overdueCount = 0;
+    for (const member of newlyOverdueMembers) {
       await Member.findByIdAndUpdate(member._id, {
-        feeStatus: 'unpaid'
+        overdueStatus: 'overdue',
+        overdueSince: member.overdueSince || new Date()
       });
       
-      updated++;
+      const daysOverdue = Math.ceil((today - member.actualExpiryDate) / (1000 * 60 * 60 * 24));
+      console.log(`🔴 Member now overdue: ${member.name} - ${daysOverdue} day(s) overdue`);
+      overdueCount++;
     }
 
-    console.log(`✅ Updated ${updated} overdue members to unpaid status`);
-    return { modifiedCount: updated };
-    
+    // Update members who are paid but were previously overdue
+    await Member.updateMany(
+      {
+        isActive: true,
+        feeStatus: 'paid',
+        overdueStatus: 'overdue'
+      },
+      {
+        overdueStatus: 'current',
+        overdueSince: null
+      }
+    );
+
+    return { newOverdueCount: overdueCount };
   } catch (error) {
-    console.error('❌ Error updating overdue members:', error);
+    console.error('❌ Error updating overdue status:', error);
+    return { newOverdueCount: 0 };
+  }
+};
+
+// UPDATED: Auto-unpaid function - triggers 2 days before actual expiry
+const updateAutoUnpaid = async () => {
+  console.log('🔄 Checking for members to auto-unpaid (on expiry date)...');
+  
+  try {
+    const today = new Date();
+    today.setHours(23, 59, 59, 999); // End of today
+    
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0); // Start of today
+
+    // Find paid members whose expiry date is today or already passed
+    const membersToUnpaid = await Member.find({
+      isActive: true,
+      feeStatus: 'paid',
+      actualExpiryDate: { $lt: today } // Expired by end of today
+    });
+
+    console.log(`Found ${membersToUnpaid.length} members to auto-unpaid (expired)`);
+
+    for (const member of membersToUnpaid) {
+      await Member.findByIdAndUpdate(member._id, {
+        feeStatus: 'unpaid',
+        unpaidSince: new Date(),
+        autoUnpaidTriggered: true,
+        smsReminderCount: 0 // Reset SMS count for unpaid period
+      });
+      
+      const daysOverdue = Math.ceil((today - member.actualExpiryDate) / (1000 * 60 * 60 * 24));
+      console.log(`🔴 Auto-unpaid: ${member.name} - expired ${daysOverdue} day(s) ago (expiry: ${member.actualExpiryDate.toDateString()})`);
+    }
+
+    return { modifiedCount: membersToUnpaid.length };
+  } catch (error) {
+    console.error('❌ Error in auto-unpaid update:', error);
     return { modifiedCount: 0 };
   }
 };
 
-// Schedule daily tasks
+// UPDATED: SMS reminder function - sends for 3 days only, stops automatically
+const sendSMSReminders = async () => {
+  console.log('📱 Checking for SMS reminders (2 days before to 1 day after expiry)...');
+  
+  try {
+    const today = new Date();
+    const twoDaysBefore = new Date();
+    twoDaysBefore.setDate(today.getDate() - 2);
+    
+    const oneDayAfter = new Date();
+    oneDayAfter.setDate(today.getDate() + 1);
+    
+    // Set proper time boundaries
+    today.setHours(23, 59, 59, 999);
+    twoDaysBefore.setHours(0, 0, 0, 0);
+    oneDayAfter.setHours(23, 59, 59, 999);
+
+    // Find members whose expiry date is within the SMS window (2 days before to 1 day after)
+    // AND haven't received SMS today yet
+    const membersForSMS = await Member.find({
+      isActive: true,
+      actualExpiryDate: { 
+        $gte: twoDaysBefore, // Expires 2+ days from now
+        $lte: oneDayAfter    // Expired max 1 day ago
+      },
+      smsReminderCount: { $lt: 4 }, // Max 4 SMS (2 before + expiry day + 1 after)
+      $or: [
+        { lastSmsReminderSentAt: { $exists: false } },
+        { lastSmsReminderSentAt: null },
+        { 
+          lastSmsReminderSentAt: { 
+            $lt: new Date(Date.now() - 23 * 60 * 60 * 1000) // 23 hours ago (once daily)
+          } 
+        }
+      ]
+    });
+
+    console.log(`Found ${membersForSMS.length} members eligible for SMS reminders`);
+
+    let smsSentCount = 0;
+
+    for (const member of membersForSMS) {
+      const expiryDate = new Date(member.actualExpiryDate);
+      const daysUntilExpiry = Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24));
+      
+      let message = '';
+      let shouldSendSMS = false;
+
+      if (daysUntilExpiry > 1) {
+        // Before expiry (2 days before, 1 day before)
+        message = `Hi ${member.name}, your gym membership expires on ${expiryDate.toDateString()} (in ${daysUntilExpiry} day${daysUntilExpiry > 1 ? 's' : ''}). Please renew to continue your service.`;
+        shouldSendSMS = true;
+      } else if (daysUntilExpiry === 1 || daysUntilExpiry === 0) {
+        // Expiry day or day before
+        const timeText = daysUntilExpiry === 1 ? 'tomorrow' : 'today';
+        message = `Hi ${member.name}, your gym membership expires ${timeText} (${expiryDate.toDateString()}). Please renew immediately to avoid service interruption.`;
+        shouldSendSMS = true;
+      } else if (daysUntilExpiry === -1) {
+        // 1 day after expiry (final reminder)
+        message = `Hi ${member.name}, your gym membership expired yesterday (${expiryDate.toDateString()}). Please renew immediately to reactivate your service.`;
+        shouldSendSMS = true;
+      }
+
+      if (shouldSendSMS) {
+        const smsSent = await sendSMS(member.phone, message);
+        
+        if (smsSent) {
+          await Member.findByIdAndUpdate(member._id, {
+            $inc: { smsReminderCount: 1 },
+            lastSmsReminderSentAt: new Date()
+          });
+          
+          console.log(`✔️ SMS sent to ${member.name} (${daysUntilExpiry > 0 ? `${daysUntilExpiry} days until` : `${Math.abs(daysUntilExpiry)} days after`} expiry, Count: ${member.smsReminderCount + 1})`);
+          smsSentCount++;
+        }
+      }
+    }
+
+    return { smsSent: smsSentCount };
+  } catch (error) {
+    console.error('❌ Error sending SMS reminders:', error);
+    return { smsSent: 0 };
+  }
+};
+
+
+// UPDATED: Daily maintenance task
+const runDailyMaintenance = async () => {
+  console.log('🔄 Running daily maintenance tasks...');
+  
+  try {
+    // First: Update members to unpaid if they expired
+    const unpaidResult = await updateAutoUnpaid();
+    
+    // Second: Update overdue status (day after expiry)
+    const overdueResult = await updateOverdueStatus();
+    
+    // Third: Send SMS reminders (2 days before to 1 day after expiry)
+    const smsResult = await sendSMSReminders();
+    
+    console.log('✅ Daily maintenance completed:', {
+      newUnpaidMembers: unpaidResult.modifiedCount,
+      newOverdueMembers: overdueResult.newOverdueCount,
+      smsRemindersSent: smsResult.smsSent
+    });
+    
+    return {
+      unpaid: unpaidResult,
+      overdue: overdueResult,
+      sms: smsResult
+    };
+  } catch (error) {
+    console.error('❌ Error in daily maintenance:', error);
+    return null;
+  }
+};
+
+// UPDATED: Schedule tasks - runs every 6 hours AND daily at midnight
+cron.schedule('0 */6 * * *', async () => {
+  console.log('🕐 Running scheduled tasks every 6 hours...');
+  await runDailyMaintenance();
+});
+
+// Additional daily task at midnight for comprehensive check
 cron.schedule('0 0 * * *', async () => {
-  console.log('🕐 Running daily tasks at midnight...');
-  await updateOverdueMembers();
-  await scheduleExpiryReminders();
-  await scheduleUnpaidReminders();
+  console.log('🌙 Running comprehensive daily maintenance at midnight...');
+  await runDailyMaintenance();
 });
 
 // Routes
 
-// Get all members
+// Get all members with overdue information
 app.get('/api/members', async (req, res) => {
   try {
-    const { page = 1, limit = 50, status, search } = req.query;
+    const { page = 1, limit = 50, status, search, overdueOnly } = req.query;
     const query = { isActive: true };
 
     if (status && ['paid', 'unpaid'].includes(status)) {
       query.feeStatus = status;
+    }
+
+    if (overdueOnly === 'true') {
+      query.overdueStatus = 'overdue';
+      query.feeStatus = 'unpaid';
     }
 
     if (search) {
@@ -363,15 +536,22 @@ app.get('/api/members', async (req, res) => {
 
     const members = await Member.find(query)
       .sort({ createdAt: -1 })
-      .limit(limit * 1)
+      .limit(Math.min(parseInt(limit), 100))
       .skip((page - 1) * limit);
+
+    // Add overdue days to each member
+    const membersWithOverdue = members.map(member => {
+      const memberObj = member.toObject();
+      memberObj.overdueDays = member.getOverdueDays();
+      return memberObj;
+    });
 
     const total = await Member.countDocuments(query);
 
     res.json({
-      members,
+      members: membersWithOverdue,
       totalPages: Math.ceil(total / limit),
-      currentPage: page,
+      currentPage: parseInt(page),
       total
     });
   } catch (error) {
@@ -387,50 +567,57 @@ app.get('/api/members/:id', async (req, res) => {
     if (!member) {
       return res.status(404).json({ error: 'Member not found' });
     }
-    res.json(member);
+    
+    const memberObj = member.toObject();
+    memberObj.overdueDays = member.getOverdueDays();
+    
+    res.json(memberObj);
   } catch (error) {
     console.error('Error fetching member:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// FIXED: Create new member with proper date handling
+// UPDATED: Create new member
 app.post('/api/members', async (req, res) => {
   try {
     const admissionDate = new Date(req.body.admissionDate);
+    
+    if (isNaN(admissionDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid admission date' });
+    }
     
     console.log('Creating new member with admission date:', admissionDate);
     
     const memberData = {
       ...req.body,
       admissionDate: admissionDate,
-      lastPaymentDate: admissionDate, // Use admission date as first payment date
       isActive: true
     };
 
     const member = new Member(memberData);
-    await member.save(); // This will trigger the pre-save middleware
+    await member.save();
 
     // Send welcome SMS
-    const message = member.feeStatus === 'paid' 
-      ? `Welcome to the gym, ${member.name}! Your membership is active until ${member.nextPaymentDue.toDateString()}.`
-      : `Welcome to the gym, ${member.name}! Your payment is overdue since ${member.nextPaymentDue.toDateString()}. Please pay to continue service.`;
-    
+    const message = `Welcome to the gym, ${member.name}! Your membership is active until ${member.actualExpiryDate.toDateString()}. Thank you for joining us!`;
     await sendSMS(member.phone, message);
 
     console.log(`✅ New member created: ${member.name}`);
     console.log(`📅 Admission date: ${member.admissionDate.toDateString()}`);
+    console.log(`📅 Actual expiry: ${member.actualExpiryDate.toDateString()}`);
     console.log(`📅 Next payment due: ${member.nextPaymentDue.toDateString()}`);
-    console.log(`💰 Fee status: ${member.feeStatus}`);
     
-    res.status(201).json(member);
+    const memberObj = member.toObject();
+    memberObj.overdueDays = member.getOverdueDays();
+    
+    res.status(201).json(memberObj);
   } catch (error) {
     console.error('Error creating member:', error);
     res.status(400).json({ error: error.message });
   }
 });
 
-// FIXED: Update member with proper date handling
+// UPDATED: Update member
 app.put('/api/members/:id', async (req, res) => {
   try {
     const member = await Member.findOne({ _id: req.params.id, isActive: true });
@@ -438,30 +625,31 @@ app.put('/api/members/:id', async (req, res) => {
       return res.status(404).json({ error: 'Member not found' });
     }
 
-    // Update fields
     const updateData = {
       ...req.body,
       admissionDate: new Date(req.body.admissionDate)
     };
 
-    // Apply updates
+    if (isNaN(updateData.admissionDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid admission date' });
+    }
+
     Object.assign(member, updateData);
-    
-    // Save will trigger pre-save middleware for recalculation
     await member.save();
 
     console.log(`📝 Member updated: ${member.name}`);
-    console.log(`📅 New admission date: ${member.admissionDate.toDateString()}`);
-    console.log(`📅 Recalculated due date: ${member.nextPaymentDue.toDateString()}`);
     
-    res.json(member);
+    const memberObj = member.toObject();
+    memberObj.overdueDays = member.getOverdueDays();
+    
+    res.json(memberObj);
   } catch (error) {
     console.error('Error updating member:', error);
     res.status(400).json({ error: error.message });
   }
 });
 
-// FIXED: Update fee status with proper logic
+// UPDATED: Update fee status
 app.patch('/api/members/:id/fee-status', async (req, res) => {
   try {
     const { feeStatus } = req.body;
@@ -478,53 +666,105 @@ app.patch('/api/members/:id/fee-status', async (req, res) => {
     const wasUnpaid = member.feeStatus === 'unpaid';
     member.feeStatus = feeStatus;
     
-    if (feeStatus === 'paid') {
-      member.lastPaymentDate = new Date(); // Update last payment date
-      // Reset reminder timestamps
-      member.lastExpiryReminderSentAt = null;
-      member.lastUnpaidReminderSentAt = null;
-    }
-    
-    await member.save(); // This will recalculate next due date
+    await member.save();
 
     // Send payment confirmation SMS
     if (wasUnpaid && member.feeStatus === 'paid') {
-      const message = `Hi ${member.name}, your payment has been received. Thank you! Your next payment is due on ${member.nextPaymentDue.toDateString()}.`;
+      const message = `Hi ${member.name}, your payment has been received. Thank you! Your membership is now active until ${member.actualExpiryDate.toDateString()}.`;
       await sendSMS(member.phone, message);
     }
 
     console.log(`💰 Fee status updated for ${member.name}: ${feeStatus}`);
-    console.log(`📅 Next due date: ${member.nextPaymentDue.toDateString()}`);
+    console.log(`📅 New expiry date: ${member.actualExpiryDate?.toDateString()}`);
     
-    res.json(member);
+    const memberObj = member.toObject();
+    memberObj.overdueDays = member.getOverdueDays();
+    
+    res.json(memberObj);
   } catch (error) {
     console.error('Error updating fee status:', error);
     res.status(400).json({ error: error.message });
   }
 });
 
-// Utility route to recalculate due dates
-app.post('/api/recalculate-due-dates', async (req, res) => {
+// NEW: Get overdue members
+app.get('/api/members/overdue', async (req, res) => {
   try {
-    const members = await Member.find({ isActive: true });
-    let updated = 0;
+    const { page = 1, limit = 50, minDays = 0 } = req.query;
     
-    for (const member of members) {
-      const oldDueDate = member.nextPaymentDue;
-      
-      // Force recalculation by triggering save
-      await member.save();
-      
-      console.log(`${member.name}: ${oldDueDate?.toDateString()} -> ${member.nextPaymentDue?.toDateString()}`);
-      updated++;
-    }
-    
-    res.json({ 
-      message: `Recalculated due dates for ${updated} members`,
-      updated 
+    const overdueMembers = await Member.find({
+      isActive: true,
+      feeStatus: 'unpaid',
+      overdueStatus: 'overdue'
+    })
+    .sort({ overdueSince: 1 }) // Oldest overdue first
+    .limit(Math.min(parseInt(limit), 100))
+    .skip((page - 1) * limit);
+
+    const membersWithDays = overdueMembers
+      .map(member => {
+        const memberObj = member.toObject();
+        memberObj.overdueDays = member.getOverdueDays();
+        return memberObj;
+      })
+      .filter(member => member.overdueDays >= parseInt(minDays));
+
+    const total = await Member.countDocuments({
+      isActive: true,
+      feeStatus: 'unpaid',
+      overdueStatus: 'overdue'
+    });
+
+    res.json({
+      members: membersWithDays,
+      totalPages: Math.ceil(total / limit),
+      currentPage: parseInt(page),
+      total
     });
   } catch (error) {
-    console.error('Error recalculating due dates:', error);
+    console.error('Error fetching overdue members:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Manual trigger for daily maintenance
+app.post('/api/trigger-maintenance', async (req, res) => {
+  try {
+    const result = await runDailyMaintenance();
+    res.json({
+      message: 'Daily maintenance completed',
+      result
+    });
+  } catch (error) {
+    console.error('Error in manual maintenance trigger:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Manual trigger for auto-unpaid (for testing)
+app.post('/api/trigger-auto-unpaid', async (req, res) => {
+  try {
+    const result = await updateAutoUnpaid();
+    res.json({
+      message: 'Auto-unpaid check completed',
+      membersUpdated: result.modifiedCount
+    });
+  } catch (error) {
+    console.error('Error in manual auto-unpaid trigger:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Manual trigger for SMS reminders (for testing)
+app.post('/api/trigger-sms-reminders', async (req, res) => {
+  try {
+    const result = await sendSMSReminders();
+    res.json({
+      message: 'SMS reminders check completed',
+      result
+    });
+  } catch (error) {
+    console.error('Error in manual SMS trigger:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -550,21 +790,7 @@ app.delete('/api/members/:id', async (req, res) => {
   }
 });
 
-// Manual overdue update trigger
-app.post('/api/update-overdue', async (req, res) => {
-  try {
-    const result = await updateOverdueMembers();
-    res.json({
-      message: 'Overdue members updated successfully',
-      modifiedCount: result.modifiedCount
-    });
-  } catch (error) {
-    console.error('Error in manual overdue update:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get dashboard statistics
+// UPDATED: Get dashboard statistics with overdue information
 app.get('/api/stats', async (req, res) => {
   try {
     const totalMembers = await Member.countDocuments({ isActive: true });
@@ -572,19 +798,46 @@ app.get('/api/stats', async (req, res) => {
     const unpaidMembers = await Member.countDocuments({ isActive: true, feeStatus: 'unpaid' });
 
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    today.setHours(23, 59, 59, 999);
     
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    yesterday.setHours(23, 59, 59, 999);
+    
+    // Overdue members (unpaid and expired more than 1 day ago)
     const overdueMembers = await Member.countDocuments({
       isActive: true,
-      nextPaymentDue: { $lt: today },
-      feeStatus: 'unpaid'
+      feeStatus: 'unpaid',
+      actualExpiryDate: { $lt: yesterday }
+    });
+
+    // Members expiring in next 2 days (will start getting SMS)
+    const expiringIn2Days = await Member.countDocuments({
+      isActive: true,
+      feeStatus: 'paid',
+      actualExpiryDate: { 
+        $gte: today, 
+        $lte: new Date(today.getTime() + 2 * 24 * 60 * 60 * 1000) 
+      }
+    });
+
+    // Members in SMS reminder window (2 days before to 1 day after expiry)
+    const inSMSWindow = await Member.countDocuments({
+      isActive: true,
+      actualExpiryDate: {
+        $gte: new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000), // 2 days ago
+        $lte: new Date(today.getTime() + 1 * 24 * 60 * 60 * 1000)  // 1 day from now
+      },
+      smsReminderCount: { $lt: 4 }
     });
 
     res.json({
       totalMembers,
       paidMembers,
       unpaidMembers,
-      overdueMembers
+      overdueMembers,
+      expiringIn2Days,
+      inSMSWindow
     });
   } catch (error) {
     console.error('Error fetching stats:', error);
@@ -635,8 +888,6 @@ app.listen(PORT, () => {
   // Run initial checks after server starts
   setTimeout(async () => {
     console.log('🔍 Running initial system checks...');
-    await updateOverdueMembers();
-    await scheduleExpiryReminders();
-    await scheduleUnpaidReminders();
+    await runDailyMaintenance();
   }, 5000);
 });

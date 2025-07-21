@@ -1,10 +1,21 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import './Gym.css';
 
-// API Configuration
-// For Electron, the backend will run on localhost:5000 by default.
-// If you are using create-react-app development server, REACT_APP_API_URL will be used.
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
+const API_BASE_URL = (() => {
+  // If running inside Electron
+  if (window.electronAPI) {
+    return 'http://localhost:5000/api';
+  }
+
+  // Always use localhost:5000 during development
+  if (process.env.NODE_ENV === 'development') {
+    return 'http://localhost:5000/api';
+  }
+
+  // Production fallback
+  return '/api';
+})();
+
 
 // API Service with better error handling
 const apiService = {
@@ -135,7 +146,7 @@ const Statistics = ({ stats, loading }) => {
 const MemberForm = ({ onRefresh, onShowToast }) => {
   const [formData, setFormData] = useState({
     name: '',
-    phone: '', // Changed from whatsapp to phone
+    phone: '',
     admissionDate: '',
     membershipType: ''
   });
@@ -146,7 +157,7 @@ const MemberForm = ({ onRefresh, onShowToast }) => {
     const newErrors = {};
     
     if (!formData.name.trim()) newErrors.name = 'Name is required';
-    if (!formData.phone.trim()) newErrors.phone = 'Phone number is required'; // Changed from whatsapp to phone
+    if (!formData.phone.trim()) newErrors.phone = 'Phone number is required';
     if (!formData.admissionDate) newErrors.admissionDate = 'Admission date is required';
     if (!formData.membershipType) newErrors.membershipType = 'Membership type is required';
     
@@ -172,7 +183,7 @@ const MemberForm = ({ onRefresh, onShowToast }) => {
       await apiService.createMember(formData);
       setFormData({
         name: '',
-        phone: '', // Changed from whatsapp to phone
+        phone: '',
         admissionDate: '',
         membershipType: ''
       });
@@ -203,16 +214,16 @@ const MemberForm = ({ onRefresh, onShowToast }) => {
           </div>
           
           <div className="form-group">
-            <label>Phone Number *</label> {/* Changed from WhatsApp to Phone */}
+            <label>Phone Number *</label>
             <input
               type="tel"
-              name="phone" // Changed from whatsapp to phone
-              value={formData.phone} // Changed from whatsapp to phone
+              name="phone"
+              value={formData.phone}
               onChange={handleChange}
-              placeholder="Enter phone number" // Changed from WhatsApp to Phone
-              className={errors.phone ? 'error' : ''} // Changed from whatsapp to phone
+              placeholder="Enter phone number"
+              className={errors.phone ? 'error' : ''}
             />
-            {errors.phone && <span className="error-text">{errors.phone}</span>} {/* Changed from whatsapp to phone */}
+            {errors.phone && <span className="error-text">{errors.phone}</span>}
           </div>
           
           <div className="form-group">
@@ -294,7 +305,7 @@ const SearchFilter = ({
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="🔍 Search members by name or phone..." // Changed from WhatsApp to Phone
+            placeholder="🔍 Search members by name or phone..."
             className="search-input"
           />
         </div>
@@ -380,8 +391,8 @@ const MemberCard = ({ member, onEdit, onDelete, onUpdateFeeStatus }) => {
       
       <div className="member-details">
         <div className="detail-row">
-          <span className="label">📱 Phone:</span> {/* Changed from WhatsApp to Phone */}
-          <span className="value">{member.phone}</span> {/* Changed from whatsapp to phone */}
+          <span className="label">📱 Phone:</span>
+          <span className="value">{member.phone}</span>
         </div>
         <div className="detail-row">
           <span className="label">📅 Admission:</span>
@@ -482,7 +493,7 @@ const MemberList = ({ members, loading, onEditMember, onDeleteMember, onUpdateFe
 const EditModal = ({ member, onUpdateMember, onClose, onShowToast }) => {
   const [formData, setFormData] = useState({
     name: '',
-    phone: '', // Changed from whatsapp to phone
+    phone: '',
     admissionDate: '',
     membershipType: ''
   });
@@ -493,7 +504,7 @@ const EditModal = ({ member, onUpdateMember, onClose, onShowToast }) => {
     if (member) {
       setFormData({
         name: member.name,
-        phone: member.phone, // Changed from whatsapp to phone
+        phone: member.phone,
         admissionDate: member.admissionDate.split('T')[0], // Assuming date string format from backend
         membershipType: member.membershipType
       });
@@ -504,7 +515,7 @@ const EditModal = ({ member, onUpdateMember, onClose, onShowToast }) => {
     const newErrors = {};
     
     if (!formData.name.trim()) newErrors.name = 'Name is required';
-    if (!formData.phone.trim()) newErrors.phone = 'Phone number is required'; // Changed from whatsapp to phone
+    if (!formData.phone.trim()) newErrors.phone = 'Phone number is required';
     if (!formData.admissionDate) newErrors.admissionDate = 'Admission date is required';
     if (!formData.membershipType) newErrors.membershipType = 'Membership type is required';
     
@@ -563,15 +574,15 @@ const EditModal = ({ member, onUpdateMember, onClose, onShowToast }) => {
           </div>
           
           <div className="form-group">
-            <label>Phone Number *</label> {/* Changed from WhatsApp to Phone */}
+            <label>Phone Number *</label>
             <input
               type="tel"
-              name="phone" // Changed from whatsapp to phone
-              value={formData.phone} // Changed from whatsapp to phone
+              name="phone"
+              value={formData.phone}
               onChange={handleChange}
-              className={errors.phone ? 'error' : ''} // Changed from whatsapp to phone
+              className={errors.phone ? 'error' : ''}
             />
-            {errors.phone && <span className="error-text">{errors.phone}</span>} {/* Changed from whatsapp to phone */}
+            {errors.phone && <span className="error-text">{errors.phone}</span>}
           </div>
           
           <div className="form-group">
@@ -694,7 +705,7 @@ const Gym = () => {
     const filtered = members.filter(member => {
       const matchesSearch = !searchTerm || 
         member.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        member.phone.includes(searchTerm); // Changed from whatsapp to phone
+        member.phone.includes(searchTerm);
       const matchesStatus = !statusFilter || member.feeStatus === statusFilter;
       return matchesSearch && matchesStatus;
     });

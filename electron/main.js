@@ -1,56 +1,87 @@
-// electron/main.js
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 
+let mainWindow;
 let backendProcess;
 
-function createWindow() {
-  const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'), // If you need it
-      nodeIntegration: false,
-      contextIsolation: true
-    }
+// Enable live reload for development
+if (process.env.NODE_ENV === 'development') {
+  require('electron-reload')(__dirname, {
+    electron: path.join(__dirname, '..', 'node_modules', '.bin', 'electron'),
+    hardResetMethod: 'exit'
   });
-
-  // Load the built React app's index.html
-  win.loadFile(path.join(__dirname, '../frontend/build/index.html')); 
-
-  // Optional: Open the DevTools.
-  // win.webContents.openDevTools();
 }
 
-app.whenReady().then(() => {
-  // Start the Node.js backend server as a child process
-  backendProcess = spawn('node', ['server.js'], {
+function createWindow() {
+  // Create the browser window
+  mainWindow = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 800,
+    minHeight: 600,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      enableRemoteModule: false,
+      preload: path.join(__dirname, 'preload.js')
+    },
+    icon: path.join(__dirname, 'assets', 'icon.png'), // Add your app icon
+    show: false // Don't show until ready
+  });
+
+  // Load the React app
+  const isDev = process.env.NODE_ENV === 'development';
+  
+  if (isDev) {
+    mainWindow.loadURL('http://localhost:3000');
+    // Open DevTools in development
+    mainWindow.webContents.openDevTools();
+  } else {
+    mainWindow.loadFile(path.join(__dirname, '../frontend/build/index.html'));
+  }
+
+  // Show window when ready to prevent visual flash
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
+
+  // Handle window closed
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+function startBackend() {
+  const isDev = process.env.NODE_ENV === 'development';
+  
+  if (isDev) {
+    // In development, backend should already be running
+    return;
+  }
+
+  // In production, start the backend process
+  const backendPath = path.join(__dirname, '../backend/server.js');
+  backendProcess = spawn('node', [backendPath], {
     cwd: path.join(__dirname, '../backend'),
-    env: { 
-        ...process.env, 
-        PORT: '5000', 
-        MONGODB_URI: 'mongodb://localhost:27017/gym_dashboard',
-        MSG91_AUTH_KEY: process.env.MSG91_AUTH_KEY, // Pass from Electron's env if set there
-        MSG91_SENDER_ID: process.env.MSG91_SENDER_ID,
-        MSG91_FLOW_ID: process.env.MSG91_FLOW_ID
-    }, 
-    stdio: 'inherit'
+    env: { ...process.env, NODE_ENV: 'production' }
   });
 
-  backendProcess.on('error', (err) => {
-    console.error('Failed to start backend process:', err);
+  backendProcess.stdout.on('data', (data) => {
+    console.log(`Backend: ${data}`);
   });
 
-  backendProcess.on('exit', (code, signal) => {
-    console.log(`Backend process exited with code ${code} and signal ${signal}`);
-    if (code !== 0) {
-      console.error('Backend server crashed!');
-    }
+  backendProcess.stderr.on('data', (data) => {
+    console.error(`Backend Error: ${data}`);
   });
+}
 
+// App event listeners
+app.whenReady().then(() => {
+  startBackend();
   createWindow();
 
+  // macOS specific behavior
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
@@ -64,10 +95,61 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('will-quit', () => {
-  // Kill the backend process when Electron app quits
+app.on('before-quit', () => {
+  // Kill backend process when app is closing
   if (backendProcess) {
-    console.log('Killing backend process...');
     backendProcess.kill();
   }
 });
+
+// Create application menu
+const template = [
+  {
+    label: 'File',
+    submenu: [
+      {
+        label: 'Refresh',
+        accelerator: 'CmdOrCtrl+R',
+        click: () => {
+          if (mainWindow) {
+            mainWindow.reload();
+          }
+        }
+      },
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        accelerator: process.platform === 'darwin' ? 'Cmd+Q' : 'Ctrl+Q',
+        click: () => {
+          app.quit();
+        }
+      }
+    ]
+  },
+  {
+    label: 'View',
+    submenu: [
+      { role: 'toggledevtools' },
+      { type: 'separator' },
+      { role: 'resetzoom' },
+      { role: 'zoomin' },
+      { role: 'zoomout' },
+      { type: 'separator' },
+      { role: 'togglefullscreen' }
+    ]
+  },
+  {
+    label: 'Help',
+    submenu: [
+      {
+        label: 'About',
+        click: () => {
+          // Add about dialog
+        }
+      }
+    ]
+  }
+];
+
+const menu = Menu.buildFromTemplate(template);
+Menu.setApplicationMenu(menu);

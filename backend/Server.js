@@ -533,6 +533,19 @@ cron.schedule('0 0 * * *', async () => {
 
 // Routes
 
+// Root route
+app.get('/', (req, res) => {
+  res.json({
+    message: '💪 Gym Management System API is running!',
+    version: '1.0.0',
+    endpoints: {
+      members: '/api/members',
+      stats: '/api/stats',
+      health: '/api/health'
+    }
+  });
+});
+
 // Get all members with overdue information
 app.get('/api/members', async (req, res) => {
   try {

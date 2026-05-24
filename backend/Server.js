@@ -14,21 +14,42 @@ app.use(express.json());
 // CORS Configuration
 app.use(cors({
   origin: (origin, callback) => {
-    const allowedOrigins = process.env.NODE_ENV === 'production'
-      ? [
-          process.env.FRONTEND_URL,
-          'file://',
-          'http://localhost:3000',
-          'http://127.0.0.1:3000',
-          `http://localhost:${PORT}`
-        ]
-      : [
-          'http://localhost:3000',
-          'http://127.0.0.1:3000',
-          `http://localhost:${PORT}`
-        ];
+    // Helper to check if origin is a local network IP (e.g. 192.168.X.X or 10.X.X.X)
+    const isLocalNetwork = (url) => {
+      if (!url) return false;
+      try {
+        const hostname = new URL(url).hostname;
+        return (
+          hostname === 'localhost' ||
+          hostname === '127.0.0.1' ||
+          /^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname) ||
+          /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname) ||
+          /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(hostname)
+        );
+      } catch (e) {
+        return false;
+      }
+    };
 
-    if (!origin || allowedOrigins.includes(origin)) {
+    const allowedOrigins = [
+      process.env.FRONTEND_URL,
+      'file://',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      `http://localhost:${PORT}`
+    ].filter(Boolean);
+
+    // Allow request if:
+    // - No origin (e.g. mobile app, curl, backend-to-backend)
+    // - Origin is in the allowed list
+    // - Origin is a GitHub Pages deployment (*.github.io)
+    // - Origin is a local network IP (for phone testing over Wi-Fi)
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      origin.endsWith('.github.io') ||
+      isLocalNetwork(origin)
+    ) {
       callback(null, true);
     } else {
       callback(new Error(`Not allowed by CORS: ${origin}`));
@@ -737,6 +758,20 @@ app.post('/api/trigger-maintenance', async (req, res) => {
     });
   } catch (error) {
     console.error('Error in manual maintenance trigger:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Alias for backwards compatibility
+app.post('/api/update-overdue', async (req, res) => {
+  try {
+    const result = await runDailyMaintenance();
+    res.json({
+      message: 'Overdue status check completed',
+      result
+    });
+  } catch (error) {
+    console.error('Error in update-overdue trigger:', error);
     res.status(500).json({ error: error.message });
   }
 });

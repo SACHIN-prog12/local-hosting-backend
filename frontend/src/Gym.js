@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import './Gym.css';
 
-const API_BASE_URL = (() => {
+const getApiBaseUrl = () => {
+  const saved = localStorage.getItem('gym_api_url');
+  if (saved) return saved;
+
   // If running inside Electron
   if (window.electronAPI) {
     return 'http://localhost:5000/api';
@@ -12,9 +15,9 @@ const API_BASE_URL = (() => {
     return 'http://localhost:5000/api';
   }
 
-  // Production fallback
-  return '/api';
-})();
+  // Production fallback (window origin + /api)
+  return window.location.origin + '/api';
+};
 
 
 // API Service with better error handling
@@ -29,12 +32,12 @@ const apiService = {
 
   getMembers: async (params = {}) => {
     const queryString = new URLSearchParams(params).toString();
-    const response = await fetch(`${API_BASE_URL}/members?${queryString}`);
+    const response = await fetch(`${getApiBaseUrl()}/members?${queryString}`);
     return apiService.handleResponse(response);
   },
 
   createMember: async (memberData) => {
-    const response = await fetch(`${API_BASE_URL}/members`, {
+    const response = await fetch(`${getApiBaseUrl()}/members`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(memberData)
@@ -43,7 +46,7 @@ const apiService = {
   },
 
   updateMember: async (id, memberData) => {
-    const response = await fetch(`${API_BASE_URL}/members/${id}`, {
+    const response = await fetch(`${getApiBaseUrl()}/members/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(memberData)
@@ -52,14 +55,14 @@ const apiService = {
   },
 
   deleteMember: async (id) => {
-    const response = await fetch(`${API_BASE_URL}/members/${id}`, {
+    const response = await fetch(`${getApiBaseUrl()}/members/${id}`, {
       method: 'DELETE'
     });
     return apiService.handleResponse(response);
   },
 
   updateFeeStatus: async (id, feeStatus) => {
-    const response = await fetch(`${API_BASE_URL}/members/${id}/fee-status`, {
+    const response = await fetch(`${getApiBaseUrl()}/members/${id}/fee-status`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ feeStatus })
@@ -68,14 +71,14 @@ const apiService = {
   },
 
   updateOverdueMembers: async () => {
-    const response = await fetch(`${API_BASE_URL}/update-overdue`, {
+    const response = await fetch(`${getApiBaseUrl()}/trigger-maintenance`, {
       method: 'POST'
     });
     return apiService.handleResponse(response);
   },
 
   getStats: async () => {
-    const response = await fetch(`${API_BASE_URL}/stats`);
+    const response = await fetch(`${getApiBaseUrl()}/stats`);
     return apiService.handleResponse(response);
   }
 };
@@ -144,6 +147,7 @@ const Statistics = ({ stats, loading }) => {
 
 // Member Form Component
 const MemberForm = ({ onRefresh, onShowToast }) => {
+  const [isOpen, setIsOpen] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     phone: '',
@@ -152,6 +156,12 @@ const MemberForm = ({ onRefresh, onShowToast }) => {
   });
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
+
+  useEffect(() => {
+    if (window.innerWidth > 768) {
+      setIsOpen(true);
+    }
+  }, []);
 
   const validateForm = () => {
     const newErrors = {};
@@ -189,6 +199,10 @@ const MemberForm = ({ onRefresh, onShowToast }) => {
       });
       onRefresh();
       onShowToast('Member added successfully!', 'success');
+      // Collapse on mobile after adding successfully
+      if (window.innerWidth <= 768) {
+        setIsOpen(false);
+      }
     } catch (error) {
       onShowToast(`Failed to add member: ${error.message}`, 'error');
     }
@@ -196,79 +210,85 @@ const MemberForm = ({ onRefresh, onShowToast }) => {
   };
 
   return (
-    <div className="member-form">
-      <h2>Add New Member</h2>
-      <form onSubmit={handleSubmit}>
-        <div className="form-grid">
-          <div className="form-group">
-            <label>Member Name *</label>
-            <input
-              type="text"
-              name="name"
-              value={formData.name}
-              onChange={handleChange}
-              placeholder="Enter member name"
-              className={errors.name ? 'error' : ''}
-            />
-            {errors.name && <span className="error-text">{errors.name}</span>}
+    <div className={`member-form-container glass-card ${isOpen ? 'open' : 'collapsed'}`}>
+      <div className="section-toggle-header" onClick={() => setIsOpen(!isOpen)}>
+        <h2>💪 Add New Member</h2>
+        <span className="toggle-icon">{isOpen ? '▲' : '▼'}</span>
+      </div>
+      
+      {isOpen && (
+        <form onSubmit={handleSubmit} className="member-form-body fade-in">
+          <div className="form-grid">
+            <div className="form-group">
+              <label>Member Name *</label>
+              <input
+                type="text"
+                name="name"
+                value={formData.name}
+                onChange={handleChange}
+                placeholder="Enter member name"
+                className={errors.name ? 'error' : ''}
+              />
+              {errors.name && <span className="error-text">{errors.name}</span>}
+            </div>
+            
+            <div className="form-group">
+              <label>Phone Number *</label>
+              <input
+                type="tel"
+                name="phone"
+                value={formData.phone}
+                onChange={handleChange}
+                placeholder="Enter phone number"
+                className={errors.phone ? 'error' : ''}
+              />
+              {errors.phone && <span className="error-text">{errors.phone}</span>}
+            </div>
+            
+            <div className="form-group">
+              <label>Admission Date *</label>
+              <input
+                type="date"
+                name="admissionDate"
+                value={formData.admissionDate}
+                onChange={handleChange}
+                className={errors.admissionDate ? 'error' : ''}
+              />
+              {errors.admissionDate && <span className="error-text">{errors.admissionDate}</span>}
+            </div>
+            
+            <div className="form-group">
+              <label>Membership Type *</label>
+              <select
+                name="membershipType"
+                value={formData.membershipType}
+                onChange={handleChange}
+                className={errors.membershipType ? 'error' : ''}
+              >
+                <option value="">Select membership type</option>
+                <option value="Monthly">Monthly</option>
+                <option value="Quarterly">Quarterly (3 months)</option>
+                <option value="Half-Yearly">Half-Yearly (6 months)</option>
+                <option value="Yearly">Yearly</option>
+              </select>
+              {errors.membershipType && <span className="error-text">{errors.membershipType}</span>}
+            </div>
           </div>
           
-          <div className="form-group">
-            <label>Phone Number *</label>
-            <input
-              type="tel"
-              name="phone"
-              value={formData.phone}
-              onChange={handleChange}
-              placeholder="Enter phone number"
-              className={errors.phone ? 'error' : ''}
-            />
-            {errors.phone && <span className="error-text">{errors.phone}</span>}
+          <div className="form-actions">
+            <button type="submit" disabled={loading} className="btn-primary">
+              {loading ? (
+                <>
+                  <span className="spinner"></span>
+                  Adding...
+                </>
+              ) : (
+                'Add Member'
+              )}
+            </button>
           </div>
-          
-          <div className="form-group">
-            <label>Admission Date *</label>
-            <input
-              type="date"
-              name="admissionDate"
-              value={formData.admissionDate}
-              onChange={handleChange}
-              className={errors.admissionDate ? 'error' : ''}
-            />
-            {errors.admissionDate && <span className="error-text">{errors.admissionDate}</span>}
-          </div>
-          
-          <div className="form-group">
-            <label>Membership Type *</label>
-            <select
-              name="membershipType"
-              value={formData.membershipType}
-              onChange={handleChange}
-              className={errors.membershipType ? 'error' : ''}
-            >
-              <option value="">Select membership type</option>
-              <option value="Monthly">Monthly</option>
-              <option value="Quarterly">Quarterly (3 months)</option>
-              <option value="Half-Yearly">Half-Yearly (6 months)</option>
-              <option value="Yearly">Yearly</option>
-            </select>
-            {errors.membershipType && <span className="error-text">{errors.membershipType}</span>}
-          </div>
-        </div>
-        
-        <div className="form-actions">
-          <button type="submit" disabled={loading} className="btn-primary">
-            {loading ? (
-              <>
-                <span className="spinner"></span>
-                Adding...
-              </>
-            ) : (
-              'Add Member'
-            )}
-          </button>
-        </div>
-      </form>
+        </form>
+      )}
     </div>
   );
 };
@@ -283,67 +303,81 @@ const SearchFilter = ({
   onUpdateOverdue,
   onShowToast
 }) => {
+  const [isOpen, setIsOpen] = useState(false);
   const [updating, setUpdating] = useState(false);
+
+  useEffect(() => {
+    if (window.innerWidth > 768) {
+      setIsOpen(true);
+    }
+  }, []);
 
   const handleUpdateOverdue = async () => {
     setUpdating(true);
     try {
-      const result = await apiService.updateOverdueMembers();
-      onShowToast(`Updated ${result.modifiedCount} overdue members`, 'success');
+      await apiService.updateOverdueMembers();
+      onShowToast(`Daily maintenance and SMS tasks completed successfully!`, 'success');
       onUpdateOverdue();
     } catch (error) {
-      onShowToast(`Failed to update overdue members: ${error.message}`, 'error');
+      onShowToast(`Failed to update: ${error.message}`, 'error');
     }
     setUpdating(false);
   };
 
   return (
-    <div className="search-filter">
-      <div className="filter-controls">
-        <div className="search-input-container">
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="🔍 Search members by name or phone..."
-            className="search-input"
-          />
-        </div>
-        
-        <select 
-          value={statusFilter} 
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="status-filter"
-        >
-          <option value="">All Members</option>
-          <option value="paid">Paid Only</option>
-          <option value="unpaid">Unpaid Only</option>
-        </select>
-        
-        <button 
-          type="button" 
-          onClick={onClearFilters}
-          className="btn-secondary"
-        >
-          Clear Filters
-        </button>
-        
-        <button 
-          type="button" 
-          onClick={handleUpdateOverdue}
-          className="btn-warning"
-          disabled={updating}
-        >
-          {updating ? (
-            <>
-              <span className="spinner"></span>
-              Checking...
-            </>
-          ) : (
-            'Check Overdue'
-          )}
-        </button>
+    <div className={`search-filter-container glass-card ${isOpen ? 'open' : 'collapsed'}`}>
+      <div className="section-toggle-header" onClick={() => setIsOpen(!isOpen)}>
+        <h2>🔍 Search & Filters</h2>
+        <span className="toggle-icon">{isOpen ? '▲' : '▼'}</span>
       </div>
+      
+      {isOpen && (
+        <div className="search-filter-body filter-controls fade-in">
+          <div className="search-input-container">
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="🔍 Search members by name or phone..."
+              className="search-input"
+            />
+          </div>
+          
+          <select 
+            value={statusFilter} 
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="status-filter"
+          >
+            <option value="">All Members</option>
+            <option value="paid">Paid Only</option>
+            <option value="unpaid">Unpaid Only</option>
+          </select>
+          
+          <button 
+            type="button" 
+            onClick={onClearFilters}
+            className="btn-secondary"
+          >
+            Clear Filters
+          </button>
+          
+          <button 
+            type="button" 
+            onClick={handleUpdateOverdue}
+            className="btn-warning"
+            disabled={updating}
+          >
+            {updating ? (
+              <>
+                <span className="spinner"></span>
+                Checking...
+              </>
+            ) : (
+              '⚡ Check Overdue'
+            )}
+          </button>
+        </div>
+      )}
     </div>
   );
 };
@@ -642,6 +676,171 @@ const EditModal = ({ member, onUpdateMember, onClose, onShowToast }) => {
   );
 };
 
+// Settings Modal Component
+const SettingsModal = ({ onClose, onShowToast }) => {
+  const [apiUrl, setApiUrl] = useState('');
+  const [testStatus, setTestStatus] = useState(null); // 'testing', 'success', 'error'
+  const [testMessage, setTestMessage] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setApiUrl(getApiBaseUrl());
+  }, []);
+
+  const handleTestConnection = async () => {
+    if (!apiUrl.trim()) {
+      setTestStatus('error');
+      setTestMessage('API URL cannot be empty');
+      return;
+    }
+    
+    setTestStatus('testing');
+    setTestMessage('⚡ Pinging server health endpoint...');
+    
+    try {
+      const startTime = Date.now();
+      const trimmedUrl = apiUrl.trim().replace(/\/+$/, '');
+      const response = await fetch(`${trimmedUrl}/health`, { 
+        method: 'GET',
+        headers: { 'Accept': 'application/json' }
+      });
+      const duration = Date.now() - startTime;
+      
+      if (response.ok) {
+        const data = await response.json();
+        setTestStatus('success');
+        setTestMessage(`🟢 Connected! Latency: ${duration}ms (uptime: ${Math.round(data.uptime || 0)}s)`);
+      } else {
+        throw new Error(`HTTP ${response.status} - ${response.statusText}`);
+      }
+    } catch (error) {
+      setTestStatus('error');
+      setTestMessage(`🔴 Connection failed: ${error.message}. Please check if the server is running and CORS is configured.`);
+    }
+  };
+
+  const handleSave = () => {
+    setSaving(true);
+    try {
+      const trimmedUrl = apiUrl.trim().replace(/\/+$/, '');
+      localStorage.setItem('gym_api_url', trimmedUrl);
+      onShowToast('Connection settings saved! Reloading...', 'success');
+      setTimeout(() => {
+        window.location.reload();
+      }, 1500);
+    } catch (err) {
+      onShowToast(`Failed to save settings: ${err.message}`, 'error');
+      setSaving(false);
+    }
+  };
+
+  const handleReset = () => {
+    localStorage.removeItem('gym_api_url');
+    onShowToast('Reset to default API URL. Reloading...', 'info');
+    setTimeout(() => {
+      window.location.reload();
+    }, 1500);
+  };
+
+  const handleUsePreset = (presetType) => {
+    let presetUrl = '';
+    if (presetType === 'localhost') {
+      presetUrl = 'http://localhost:5000/api';
+    } else if (presetType === 'local-wifi') {
+      const ip = window.prompt("Enter your PC's IP address (e.g. 192.168.1.100):", "192.168.1.");
+      if (ip) {
+        presetUrl = `http://${ip.trim()}:5000/api`;
+      } else {
+        return;
+      }
+    }
+    setApiUrl(presetUrl);
+    setTestStatus(null);
+    setTestMessage('');
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-content glass-modal animate-slide-up">
+        <div className="modal-header">
+          <h2>⚙️ Connection Settings</h2>
+          <button onClick={onClose} className="close-button">×</button>
+        </div>
+        <div className="modal-form">
+          <p className="settings-desc">
+            Configure your backend API URL to use the app on other devices like your phone!
+          </p>
+          
+          <div className="form-group">
+            <label>Backend API URL</label>
+            <input
+              type="text"
+              value={apiUrl}
+              onChange={(e) => {
+                setApiUrl(e.target.value);
+                setTestStatus(null);
+                setTestMessage('');
+              }}
+              placeholder="e.g. http://localhost:5000/api or https://your-backend.onrender.com/api"
+              className="settings-input"
+            />
+          </div>
+
+          <div className="preset-buttons">
+            <button type="button" onClick={() => handleUsePreset('localhost')} className="btn-preset">
+              💻 Local PC
+            </button>
+            <button type="button" onClick={() => handleUsePreset('local-wifi')} className="btn-preset">
+              📶 Wi-Fi Access
+            </button>
+          </div>
+
+          <div className="test-connection-section">
+            <button 
+              type="button" 
+              onClick={handleTestConnection} 
+              className={`btn-test ${testStatus === 'testing' ? 'testing' : ''}`}
+              disabled={testStatus === 'testing'}
+            >
+              ⚡ Test Connection
+            </button>
+            {testMessage && (
+              <div className={`test-result-box ${testStatus}`}>
+                {testMessage}
+              </div>
+            )}
+          </div>
+
+          <div className="modal-actions settings-actions">
+            <button 
+              type="button" 
+              onClick={handleSave} 
+              className="btn-primary"
+              disabled={saving}
+            >
+              {saving ? 'Saving...' : '💾 Save & Apply'}
+            </button>
+            <button 
+              type="button" 
+              onClick={handleReset} 
+              className="btn-secondary btn-reset-link"
+            >
+              🔄 Reset to Default
+            </button>
+            <button 
+              type="button" 
+              onClick={onClose} 
+              className="btn-secondary"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // Main App Component
 const Gym = () => {
   const [members, setMembers] = useState([]);
@@ -654,6 +853,7 @@ const Gym = () => {
   const [statsLoading, setStatsLoading] = useState(true);
   const [error, setError] = useState('');
   const [toast, setToast] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
 
   // Show toast notification
   const showToast = useCallback((message, type = 'info') => {
@@ -762,14 +962,36 @@ const Gym = () => {
   if (error && !members.length) {
     return (
       <div className="gym-app">
-        <div className="error-container">
+        {toast && (
+          <Toast 
+            message={toast.message} 
+            type={toast.type} 
+            onClose={() => setToast(null)} 
+          />
+        )}
+        <div className="error-container glass-card">
           <div className="error-icon">⚠️</div>
           <h2>Connection Error</h2>
           <p>{error}</p>
-          <button onClick={refreshData} className="btn-primary">
-            Try Again
-          </button>
+          <p className="error-help">
+            Could not connect to the backend server. If you are using a mobile phone, verify that your backend server is running and your API URL settings are correct.
+          </p>
+          <div className="error-actions">
+            <button onClick={refreshData} className="btn-primary">
+              🔄 Try Again
+            </button>
+            <button onClick={() => setShowSettings(true)} className="btn-secondary">
+              ⚙️ Connection Settings
+            </button>
+          </div>
         </div>
+
+        {showSettings && (
+          <SettingsModal
+            onClose={() => setShowSettings(false)}
+            onShowToast={showToast}
+          />
+        )}
       </div>
     );
   }
@@ -784,9 +1006,18 @@ const Gym = () => {
         />
       )}
 
-      <header className="app-header">
+      <header className="app-header glass-header">
         <div className="header-content">
-          <h1>💪 Gym Management System</h1>
+          <div className="header-title-row">
+            <h1>💪 Gym Management System</h1>
+            <button 
+              onClick={() => setShowSettings(true)} 
+              className="btn-settings-toggle"
+              title="Connection Settings"
+            >
+              ⚙️
+            </button>
+          </div>
           <p>Manage your gym members efficiently</p>
         </div>
       </header>
@@ -806,7 +1037,7 @@ const Gym = () => {
           onShowToast={showToast}
         />
         
-        <div className="members-section">
+        <div className="members-section glass-card">
           <div className="section-header">
             <h2>Members ({filteredMembers.length})</h2>
             <button 
@@ -833,6 +1064,13 @@ const Gym = () => {
           member={editingMember}
           onUpdateMember={updateMember}
           onClose={() => setEditingMember(null)}
+          onShowToast={showToast}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
           onShowToast={showToast}
         />
       )}

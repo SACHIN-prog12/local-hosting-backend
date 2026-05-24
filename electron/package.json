@@ -8,12 +8,11 @@
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
-    "build:linux": "electron-builder --linux"
-  },
-  "dependencies": {
-    "electron": "^22.0.0"
+    "build:linux": "electron-builder --linux",
+    "prebuild": "cd ../frontend && npm run build"
   },
   "devDependencies": {
+    "electron": "^37.2.3",
     "electron-builder": "^24.0.0"
   },
   "build": {
@@ -25,7 +24,14 @@
     "files": [
       "main.js",
       "preload.js",
-      "../frontend/build/**/*"
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../frontend/build",
+        "to": "frontend/build",
+        "filter": ["**/*"]
+      }
     ],
     "win": {
       "target": "nsis",
